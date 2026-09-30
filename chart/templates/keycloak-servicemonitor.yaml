@@ -1,0 +1,29 @@
+{{- /*
+The Keycloak operator auto-creates its own ServiceMonitor named "keycloak" when
+metrics-enabled is true, but its labels don't match Prometheus's serviceMonitorSelector
+(missing `release: prometheus`). This chart-managed SM uses a different name to avoid
+the collision; the operator's SM stays untouched (invisible to Prometheus, harmless).
+*/ -}}
+{{- if .Values.keycloak.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: keycloak-metrics
+  labels:
+    {{- include "keycloak-operator.labels" . | nindent 4 }}
+    {{- with .Values.keycloak.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # Matches the Service the operator creates for the Keycloak StatefulSet
+  # (keycloak-service, with management port 9000 exposing /metrics).
+  selector:
+    matchLabels:
+      app: keycloak
+      app.kubernetes.io/managed-by: keycloak-operator
+  endpoints:
+    - port: management
+      path: /metrics
+      interval: {{ .Values.keycloak.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.keycloak.serviceMonitor.scrapeTimeout }}
+{{- end }}
