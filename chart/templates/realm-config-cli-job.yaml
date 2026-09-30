@@ -1,0 +1,132 @@
+{{- if and .Values.realmConfigCli.enabled (gt (len .Values.realms) 0) }}
+{{- $hash := .Values.realms | toYaml | sha256sum | trunc 8 }}
+{{- $keycloakSvc := printf "http://%s-service.%s.svc:8080" (default "keycloak" .Values.realmConfigCli.keycloakCRName) .Release.Namespace }}
+{{- /* Resolve the admin Secret name. Defaults to the same Secret driving
+       the operator's bootstrapAdmin (single source of truth, regardless of
+       whether the Secret is chart-rendered or externally provisioned).
+       Override realmConfigCli.adminSecret.name only if config-cli should use
+       a different Secret than the operator's bootstrap user. */ -}}
+{{- $adminSecretName := .Values.realmConfigCli.adminSecret.name | default (include "keycloak-operator.bootstrapAdminSecretName" .) }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Release.Name }}-realm-config-cli-{{ $hash }}
+  labels:
+    {{- include "keycloak-operator.labels" . | nindent 4 }}
+    app.kubernetes.io/component: realm-config-cli
+  annotations:
+    {{- if eq $.Values.installManager "argocd" }}
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation,HookSucceeded
+    argocd.argoproj.io/sync-wave: "10"
+    {{- else if eq $.Values.installManager "helm" }}
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    {{- end }}
+spec:
+  backoffLimit: {{ .Values.realmConfigCli.backoffLimit | default 3 }}
+  ttlSecondsAfterFinished: {{ .Values.realmConfigCli.ttlSecondsAfterFinished | default 3600 }}
+  template:
+    metadata:
+      labels:
+        {{- include "keycloak-operator.labels" . | nindent 8 }}
+        app.kubernetes.io/component: realm-config-cli
+    spec:
+      restartPolicy: Never
+      {{- with .Values.realmConfigCli.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.realmConfigCli.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.realmConfigCli.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.realmConfigCli.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        # Gate on the realm being created by the operator's KeycloakRealmImport.
+        # The well-known endpoint is public once the realm exists, so no admin
+        # token needed for the probe.
+        - name: wait-for-realms
+          image: curlimages/curl:8.10.1
+          command:
+            - sh
+            - -c
+            - |
+              set -e
+              MAX_WAIT={{ .Values.realmConfigCli.waitForRealmsTimeoutSeconds | default 600 }}
+              {{- range $realmName, $realmData := .Values.realms }}
+              realm="{{ $realmData.realm.realm }}"
+              echo "Waiting for realm '$realm' (max ${MAX_WAIT}s)..."
+              deadline=$(( $(date +%s) + MAX_WAIT ))
+              until curl -sf "{{ $keycloakSvc }}/realms/$realm/.well-known/openid-configuration" >/dev/null; do
+                if [ "$(date +%s)" -ge "$deadline" ]; then
+                  echo "  timed out waiting for realm '$realm' after ${MAX_WAIT}s"
+                  exit 1
+                fi
+                echo "  realm $realm not ready yet, sleeping 5s"
+                sleep 5
+              done
+              echo "  realm $realm is ready"
+              {{- end }}
+      containers:
+        - name: config-cli
+          {{- with .Values.realmConfigCli.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          image: {{ .Values.realmConfigCli.image.repository }}:{{ .Values.realmConfigCli.image.tag }}
+          imagePullPolicy: {{ .Values.realmConfigCli.image.pullPolicy | default "IfNotPresent" }}
+          env:
+            - name: KEYCLOAK_URL
+              value: {{ $keycloakSvc | quote }}
+            - name: KEYCLOAK_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecretName }}
+                  key: {{ .Values.realmConfigCli.adminSecret.usernameKey | default "username" }}
+            - name: KEYCLOAK_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $adminSecretName }}
+                  key: {{ .Values.realmConfigCli.adminSecret.passwordKey | default "password" }}
+            - name: KEYCLOAK_AVAILABILITYCHECK_ENABLED
+              value: "true"
+            - name: KEYCLOAK_AVAILABILITYCHECK_TIMEOUT
+              value: "120s"
+            - name: IMPORT_FILES_LOCATIONS
+              value: "/config/*.yaml"
+            - name: IMPORT_VARSUBSTITUTION_ENABLED
+              value: "true"
+            - name: IMPORT_MANAGED_CLIENT
+              value: {{ .Values.realmConfigCli.managed.client | default "no-delete" | quote }}
+            - name: IMPORT_MANAGED_IDENTITY_PROVIDER
+              value: {{ .Values.realmConfigCli.managed.identityProvider | default "no-delete" | quote }}
+            - name: IMPORT_MANAGED_IDENTITY_PROVIDER_MAPPER
+              value: {{ .Values.realmConfigCli.managed.identityProviderMapper | default "no-delete" | quote }}
+            - name: IMPORT_MANAGED_AUTHENTICATION_FLOW
+              value: {{ .Values.realmConfigCli.managed.authenticationFlow | default "no-delete" | quote }}
+            {{- with .Values.realmConfigCli.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: realm-config
+              mountPath: /config
+          resources:
+            {{- toYaml .Values.realmConfigCli.resources | nindent 12 }}
+      volumes:
+        - name: realm-config
+          projected:
+            sources:
+              {{- range $realmName, $_ := .Values.realms }}
+              - configMap:
+                  name: {{ $realmName }}-realm-config
+              {{- end }}
+{{- end }}
