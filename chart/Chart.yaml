@@ -1,0 +1,14 @@
+apiVersion: v2
+name: keycloak-operator
+description: Keycloak operator with bundled in-cluster Postgres, Keycloak CR, and realm imports
+type: application
+version: 0.1.0
+appVersion: "26.6.1"
+home: https://www.keycloak.org/
+sources:
+  - https://github.com/keycloak/keycloak
+keywords:
+  - keycloak
+  - sso
+  - identity
+  - operator
