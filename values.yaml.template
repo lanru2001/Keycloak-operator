@@ -1,0 +1,180 @@
+# =============================================================================
+# Keycloak Operator — Lasso base values (the deliverable's "must" config)
+# =============================================================================
+#
+# This file ships the FULL Lasso realm baseline that is identical for every
+# deployment (the `lasso-platform` SPA client, PKCE, the Auto-Link First Login
+# flow, the `idp` JWT claim mapper, the session/token model). The upstream chart
+# ships `realms: {}` empty — Lasso's realm lives HERE.
+#
+# Value layering (highest priority last):
+#   1. chart/values.yaml   — operator/server/probe/metrics defaults (documented inline)
+#   2. THIS FILE           — Lasso realm + client + DB/hostname/bootstrap/ingress shape
+#   3. environment overlay — per-deployment specifics & IdPs:
+#        • Lasso SaaS dev   -> infra/apps/keycloak-operator/dev_values.yaml
+#        • Lasso on-cloud   -> infra/apps/keycloak-operator/private_cloud_values.yaml
+#        • Customer-hosted  -> docs/examples/keycloak-operator/values.yaml (IdP examples)
+#
+# ${...} placeholders are filled by envsubst on Lasso on-cloud (init-env.sh) or by
+# the customer/operator by hand. See README.md "Placeholders to Replace".
+# Identity providers are deployment-specific (which corporate IdP the customer
+# uses) and are intentionally left empty here — configure them in the overlay
+# (see docs/examples/keycloak-operator for Google / Microsoft / SAML).
+#
+# Requires Keycloak 26.3.0+ (26.6.1 recommended) — older versions lack the
+# Organization login_hint auto-redirect.
+
+# Database: external managed Postgres (RDS) by default. Set postgres.enabled=true
+# in an overlay to run the bundled in-cluster Postgres instead.
+postgres:
+  enabled: false
+
+keycloak:
+  enabled: true
+  # HA: 2-instance cluster (JDBC_PING through the shared DB).
+  instances: 2
+
+  hostname:
+    # Public Keycloak URL. Keycloak uses this as the base for ALL generated URLs.
+    hostname: https://${KEYCLOAK_HOST}
+    strict: true
+
+  db:
+    vendor: postgres
+    host: ${KEYCLOAK_DB_HOST}
+    port: 5432
+    database: keycloak
+    username: ${KEYCLOAK_DB_USERNAME}
+    url: "jdbc:postgresql://${KEYCLOAK_DB_HOST}:5432/keycloak?sslmode=require"
+    # Plain-text path (no External Secrets needed): chart renders the Secret inline.
+    # Overlays that DO use External Secrets set create:false + provide the Secret.
+    credentialsSecret:
+      name: keycloak-db-secret
+      usernameKey: username
+      passwordKey: password
+      create: true
+      password: "${KEYCLOAK_DB_PASSWORD}"
+
+  # Bootstrap admin — plain-text path (no External Secrets needed).
+  bootstrapAdmin:
+    username: "admin"
+    password: "${KEYCLOAK_ADMIN_PASSWORD}"
+
+  ingress:
+    enabled: true
+    className: alb            # alb (EKS), nginx, azure-application-gateway, …
+    annotations:            # per-environment (TLS cert, scheme) — set in overlay
+       alb.ingress.kubernetes.io/target-type: ip
+       alb.ingress.kubernetes.io/scheme: internal
+       alb.ingress.kubernetes.io/group.name: "${ALB_GROUP_NAME}" 
+       alb.ingress.kubernetes.io/success-codes: "200,302" 
+
+  # Enable in an overlay where a Prometheus operator + matching selector exist.
+  serviceMonitor:
+    enabled: false
+    labels: {}
+
+# keycloak-config-cli reconciles the `realms:` spec below on every sync
+# (KeycloakRealmImport only creates a realm once and never updates it).
+realmConfigCli:
+  enabled: true
+
+# =============================================================================
+# Lasso realm — common to every deployment. Identity providers are added per
+# deployment in the overlay (see docs/examples/keycloak-operator/values.yaml).
+# =============================================================================
+realms:
+  lasso-realm:
+    keycloakCRName: keycloak
+    realm:
+      # Realm id used in URLs; MUST match AUTHORITY_URL / VITE_IDP_AUTHORITY =
+      # https://${KEYCLOAK_HOST}/realms/${KEYCLOAK_REALM}
+      realm: ${KEYCLOAK_REALM}
+      displayName: "Lasso Platform"
+      enabled: true
+      sslRequired: external          # require HTTPS externally; allow HTTP for private/localhost
+      loginWithEmailAllowed: true
+      duplicateEmailsAllowed: false
+      registrationAllowed: false     # no self-service "Register" link
+
+      # --- Session settings (mirror Cognito's stateless 30-day refresh model) ---
+      ssoSessionIdleTimeout: 2592000 # 30 days (= max, effectively disables idle timeout)
+      ssoSessionMaxLifespan: 2592000 # 30 days
+
+      # --- Token settings ---
+      accessTokenLifespan: 3600      # 60 min (frontend silently refreshes before expiry)
+      revokeRefreshToken: false
+      accessCodeLifespanLogin: 180   # 3 min to complete the full login flow
+
+      # --- First-login flow: auto-create/link federated users by email, no prompt ---
+      # Assigned per-IdP via firstBrokerLoginFlowAlias. Safe because all IdPs are trusted.
+      authenticationFlows:
+        - alias: "Auto-Link First Login"
+          description: "Auto links IdP connection based on the same email"
+          providerId: "basic-flow"
+          topLevel: true
+          builtIn: false
+          authenticationExecutions:
+            - authenticator: "idp-create-user-if-unique"
+              authenticatorFlow: false
+              requirement: "ALTERNATIVE"
+              priority: 0
+            - authenticator: "idp-auto-link"
+              authenticatorFlow: false
+              requirement: "ALTERNATIVE"
+              priority: 1
+
+      # --- The Lasso dashboard SPA client (public, PKCE) ---
+      clients:
+        - clientId: "lasso-platform"          # must match VITE_IDP_CLIENT_ID
+          name: "Lasso Platform"
+          enabled: true
+          publicClient: true                  # SPA — PKCE only, no client secret
+          standardFlowEnabled: true           # Authorization Code + PKCE
+          implicitFlowEnabled: false
+          directAccessGrantsEnabled: false
+          redirectUris:
+            - "https://${DASHBOARD_URL}/*"
+          attributes:
+            post.logout.redirect.uris: "https://${DASHBOARD_URL}/*"
+            use.refresh.tokens: "true"
+            pkce.code.challenge.method: "S256"  # enforce PKCE S256 for the public SPA
+          webOrigins:
+            - "https://${DASHBOARD_URL}"
+          defaultClientScopes:
+            - "web-origins"
+            - "profile"
+            - "email"
+          # Surfaces the login IdP alias as the JWT "idp" claim; the backend's
+          # determineAuthType() reads it to record the login method.
+          protocolMappers:
+            - name: "idp"
+              protocol: "openid-connect"
+              protocolMapper: "oidc-usersessionmodel-note-mapper"
+              config:
+                user.session.note: "identity_provider"
+                claim.name: "idp"
+                jsonType.label: "String"
+                id.token.claim: "true"
+                access.token.claim: "true"
+            # Optional custom role claim — emits the ${CUSTOM_ROLE_ATTRIBUTE_CLAIM} user
+            # attribute (imported by the SAML IdP mapper) as a JWT claim. Uncomment to enable.
+            # ROLE-CLAIM-BEGIN
+            # - name: "${CUSTOM_ROLE_ATTRIBUTE_CLAIM}"
+            #   protocol: "openid-connect"
+            #   protocolMapper: "oidc-usermodel-attribute-mapper"
+            #   config:
+            #     user.attribute: "${CUSTOM_ROLE_ATTRIBUTE_CLAIM}"
+            #     claim.name: "${CUSTOM_ROLE_ATTRIBUTE_CLAIM}"
+            #     jsonType.label: "String"
+            #     id.token.claim: "true"
+            #     access.token.claim: "true"
+            # ROLE-CLAIM-END
+
+      # Identity providers + their attribute mappers are deployment-specific.
+      # Configure in the overlay — see docs/examples/keycloak-operator/values.yaml
+      # for Google, Microsoft and SAML examples. login options shown by the
+      # dashboard come from VITE_IDP_LOGIN_OPTIONS (e.g. "google,saml") — every
+      # option listed there MUST have a matching IdP configured here.
+      identityProviders: []
+      identityProviderMappers: []
