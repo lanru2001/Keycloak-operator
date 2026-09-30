@@ -1,0 +1,14 @@
+{{- /* Only meaningful at 2+ replicas; on a single replica a PDB just deadlocks drains. */}}
+{{- if and .Values.postgres.enabled .Values.postgres.pdb.enabled (gt (int .Values.postgres.replicas) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: postgres
+  labels:
+    {{- include "keycloak-operator.postgresLabels" . | nindent 4 }}
+spec:
+  minAvailable: {{ sub (int .Values.postgres.replicas) 1 }}
+  selector:
+    matchLabels:
+      {{- include "keycloak-operator.postgresSelectorLabels" . | nindent 6 }}
+{{- end }}
