@@ -1,0 +1,306 @@
+# Default values for keycloak-operator.
+# Production-shaped defaults; dev opts in via dev_values.yaml.
+
+operator:
+  # Gated, default-off. Empty => securityContext is omitted (no change to existing pods).
+  podSecurityContext: {}
+  securityContext: {}
+  image:
+    repository: quay.io/keycloak/keycloak-operator
+    tag: 26.6.1
+    pullPolicy: Always
+  # Image used by the operator when reconciling Keycloak CRs.
+  relatedKeycloakImage: quay.io/keycloak/keycloak:26.6.1
+  replicas: 1
+  resources:
+    limits:
+      cpu: 700m
+      memory: 450Mi
+    requests:
+      cpu: 300m
+      memory: 450Mi
+
+  # ServiceAccount config. Annotations here are commonly used for IRSA on EKS
+  # (eks.amazonaws.com/role-arn) or workload identity on AKS.
+  serviceAccount:
+    annotations: {}
+
+  # Namespace scope for each operator-SDK controller.
+  #   JOSDK_WATCH_CURRENT       — watch the namespace the operator is deployed in (default)
+  #   JOSDK_WATCH_ALL_NAMESPACES — cluster-wide
+  #   "<ns1>,<ns2>"             — explicit comma-separated list
+  watchNamespaces:
+    keycloak: JOSDK_WATCH_CURRENT
+    realmImport: JOSDK_WATCH_CURRENT
+
+  # Health probes — Quarkus health endpoints on port 8080.
+  probes:
+    liveness:
+      httpGet:
+        path: /q/health/live
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+    readiness:
+      httpGet:
+        path: /q/health/ready
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+    startup:
+      httpGet:
+        path: /q/health/started
+        port: 8080
+        scheme: HTTP
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 10
+      failureThreshold: 3
+      successThreshold: 1
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels for prometheus-operator selector (e.g. release: kube-prometheus-stack).
+    labels: {}
+
+  # Standard pod scheduling knobs for the operator Deployment.
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+
+# In-cluster Postgres backing Keycloak. Off by default (prod uses RDS); dev enables.
+postgres:
+  # Gated, default-off. Empty => securityContext is omitted (no change to existing pods).
+  podSecurityContext: {}
+  securityContext: {}
+  enabled: false
+  replicas: 1
+  image: postgres:16-alpine
+  storage: 8Gi
+  storageClassName: gp3
+  # PDB for the StatefulSet — only applies at replicas > 1.
+  pdb:
+    enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Keycloak CR managed by the operator.
+keycloak:
+  enabled: true
+  # HA — JGroups + Infinispan clustering uses JDBC_PING through the shared RDS.
+  instances: 2
+  db:
+    vendor: postgres
+    # Service name when postgres.enabled, RDS endpoint otherwise.
+    host: postgres
+    port: 5432
+    database: keycloak
+    # DB connection username — plain config (not secret). Used by Postgres
+    # StatefulSet probes and as the username written into the credentials Secret
+    # when credentialsSecret.create=true.
+    username: keycloak
+
+    # K8s Secret holding DB credentials. Two modes:
+    #   - create: true  (DEFAULT) → chart renders the Secret inline from the
+    #                               password below + keycloak.db.username.
+    #                               Plaintext path; ship-ready for customers
+    #                               without external secret tooling.
+    #   - create: false           → chart skips Secret rendering; the named
+    #                               Secret must be provisioned externally
+    #                               (e.g. ExternalSecret in extraResources)
+    #                               with `usernameKey` + `passwordKey` keys.
+    credentialsSecret:
+      name: keycloak-db-secret
+      usernameKey: username
+      passwordKey: password
+      create: true
+      password: ""    # REQUIRED when create=true — chart fails install if unset
+
+    # url: ""          # JDBC URL override, e.g. "jdbc:postgresql://...?sslmode=require"
+    # poolMaxSize: 30
+
+  http:
+    # Flip to false once ingress terminates TLS.
+    httpEnabled: true
+    # tlsSecret: ""  # Set for end-to-end TLS path.
+  hostname:
+    hostname: ""
+    # Flip to true once ingress serves the matching FQDN.
+    strict: false
+  proxy:
+    headers: xforwarded
+
+  # Resources for the Keycloak StatefulSet pods (operator passes these through).
+  # Starting point — tune after observing real traffic.
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1500Mi
+  ingress:
+    enabled: true
+    className: alb
+    annotations: {}
+  # Standard pod scheduling knobs, same shape as every other chart. The CRD has
+  # no pod-spec fields for these — the template maps them into spec.scheduling,
+  # which is how the operator sets them on the pods. Empty by default: pods
+  # schedule anywhere. (No nodeSelector — the CRD doesn't support it; use
+  # affinity.nodeAffinity instead.)
+  affinity: {}
+  tolerations: []
+
+  # Passthrough to spec.additionalOptions. Full metric set enabled by default —
+  # includes JVM, HTTP request latency, DB pool, cache, AND user-event metrics
+  # (logins, logouts, registrations). High cardinality envs (prod) may want to
+  # dial event-metrics-user-tags down to just `realm` to reduce series count.
+  additionalOptions:
+    - name: metrics-enabled
+      value: "true"
+    - name: health-enabled
+      value: "true"
+    # User event metrics: keycloak_user_events_total{realm,event,...}
+    - name: event-metrics-user-enabled
+      value: "true"
+    # Extra dimensions for user-event metrics. Cardinality: realms × idps × clients.
+    - name: event-metrics-user-tags
+      value: "realm,idp,clientId"
+    # Infinispan cache operation latency histograms.
+    - name: cache-metrics-histograms-enabled
+      value: "true"
+    # HTTP request latency histogram buckets (milliseconds).
+    - name: http-metrics-slos
+      value: "5,10,25,50,250,500,1000,5000"
+
+  # ServiceMonitor for the Keycloak instance pods (port 9000 / management /metrics).
+  # The Keycloak operator also auto-creates a ServiceMonitor when metrics-enabled is true,
+  # but it lacks Prometheus's required selector label. This chart-managed one fills the gap.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels required by your Prometheus serviceMonitorSelector
+    # (e.g. release: prometheus for kube-prometheus-stack).
+    labels: {}
+
+  # Bootstrap admin user — only used by the operator on initial cluster creation.
+  #
+  # The K8s Secret name is ONE value across both provisioning paths:
+  #   `secretName` (or auto-derived `<release>-bootstrap-admin` if empty).
+  # The Keycloak CR and the config-cli Job both reference that exact name.
+  #
+  # Three modes (mutually exclusive):
+  #   1. password set         (DEFAULT, plaintext) → chart renders the Secret
+  #                            inline under `secretName`. Ship-ready for
+  #                            customers without external secret tooling — set
+  #                            `password` and you're done.
+  #   2. secretName set,      → external provider (ExternalSecret, Vault, etc.)
+  #      password empty         must provision a Secret with that exact name,
+  #                             keys `username` + `password` (CRD-fixed).
+  #   3. All empty            → no spec.bootstrapAdmin. Use keycloak.env below to
+  #                             set KEYCLOAK_ADMIN / KEYCLOAK_ADMIN_PASSWORD from
+  #                             any Secret, or let the operator auto-generate the
+  #                             initial admin.
+  bootstrapAdmin:
+    username: "admin"
+    password: ""     # REQUIRED for mode 1 — set this, OR set secretName (mode 2)
+    secretName: ""   # Optional — pin a specific K8s Secret name. Used in both
+                     # modes 1 and 2. Empty falls back to "<release>-bootstrap-admin".
+
+  # Passthrough to spec.env on the Keycloak CR. Each item: { name, value | secret: { name, key } }.
+  # Common use: bootstrap admin via legacy env vars when the Secret keys don't match
+  # the spec.bootstrapAdmin format (`username`+`password`).
+  env: []
+
+# Map of KeycloakRealmImport resources keyed by realm name.
+# Each entry: { keycloakCRName: <name>, realm: { <full realm spec> } }.
+realms: {}
+
+# keycloak-config-cli reconciler — fills the gap left by KeycloakRealmImport,
+# which only creates a realm and never updates it. Runs as a Helm/Argo post-hook
+# Job that diffs each realm's YAML against the live admin API and applies the
+# delta. Mirrors the same `installManager` pattern as the platform's
+# migration-job (see lasso-platform/apps/server/chart/templates/migration-job.yaml).
+realmConfigCli:
+  # Gated, default-off. Empty => securityContext is omitted (no change to existing pods).
+  podSecurityContext: {}
+  securityContext: {}
+  enabled: false
+  image:
+    repository: quay.io/adorsys/keycloak-config-cli
+    # Tag format: <cli-version>-<keycloak-version>. Keep the KC suffix in sync
+    # with operator.relatedKeycloakImage above.
+    tag: 6.4.0-26.0.5
+    pullPolicy: IfNotPresent
+  # Name of the Keycloak CR the Job targets; resolves to <name>-service.<ns>.svc:8080.
+  keycloakCRName: keycloak
+  # Bootstrap admin Secret — defaults to whatever keycloak.bootstrapAdmin
+  # resolves to. Resolution order (matches keycloak.yaml template):
+  #   1. realmConfigCli.adminSecret.name (this field, if set)
+  #   2. keycloak.bootstrapAdmin.secretName (external-secret mode)
+  #   3. "<release>-bootstrap-admin" (chart-rendered plaintext mode)
+  # Override `name` only if config-cli should use a different admin Secret
+  # than the one driving the operator's bootstrapAdmin (uncommon).
+  adminSecret:
+    name: ""
+    usernameKey: username
+    passwordKey: password
+  # Deletion policy per resource type. `no-delete` = additive/update-only (safe
+  # default). `full` = delete resources not in YAML (use with care once you trust
+  # the YAML is authoritative).
+  managed:
+    client: no-delete
+    identityProvider: no-delete
+    identityProviderMapper: no-delete
+    authenticationFlow: no-delete
+  backoffLimit: 3
+  ttlSecondsAfterFinished: 3600
+  # Max seconds the wait-for-realms initContainer polls each realm's
+  # /.well-known/openid-configuration before failing the Job. Prevents the
+  # hook from blocking helm/argo sync indefinitely if the operator's import
+  # Job never produces the realm (misconfig, DB down, etc.).
+  waitForRealmsTimeoutSeconds: 600
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  affinity: {}
+  tolerations: []
+  extraEnv: []
+
+# Scheduling for the realm-import Jobs the operator spawns (one per realm in
+# `realms:`). Standard shape; the template maps them into the
+# KeycloakRealmImport CR's spec.import.scheduling.
+realmImport:
+  affinity: {}
+  tolerations: []
+
+# Toggles between Helm and ArgoCD hook annotations on Jobs that need
+# install-manager-aware lifecycle. Mirrors the lasso-platform server chart.
+# Default is `helm` so plain `helm upgrade` works out of the box; ArgoCD
+# Applications override this to `argocd` at the Application values level.
+installManager: helm
+
+# Arbitrary manifests rendered verbatim — used for per-env ExternalSecrets,
+# NetworkPolicies, etc. (See apps/litellm-proxy/stag_values.yaml for the pattern.)
+extraResources: []
