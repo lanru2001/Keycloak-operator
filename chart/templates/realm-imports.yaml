@@ -1,0 +1,19 @@
+{{- range $realmName, $realmData := .Values.realms }}
+---
+apiVersion: k8s.keycloak.org/v2beta1
+kind: KeycloakRealmImport
+metadata:
+  name: {{ $realmName }}
+  labels:
+    {{- include "keycloak-operator.labels" $ | nindent 4 }}
+spec:
+  keycloakCRName: {{ default "keycloak" $realmData.keycloakCRName }}
+  realm:
+    {{- /* userProfile is not a RealmRepresentation field, so it cannot go in the CR
+           (Kubernetes rejects the whole resource). config-cli delivers it from the
+           ConfigMap via PUT /users/profile — see realm-configmap.yaml. */}}
+    {{- if and (hasKey $realmData.realm "userProfile") (not $.Values.realmConfigCli.enabled) }}
+    {{- fail (printf "realms.%s.realm.userProfile requires realmConfigCli.enabled=true — the operator CR cannot carry it" $realmName) }}
+    {{- end }}
+    {{- toYaml (omit $realmData.realm "userProfile") | nindent 4 }}
+{{- end }}
