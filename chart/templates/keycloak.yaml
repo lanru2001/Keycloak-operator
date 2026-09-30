@@ -1,0 +1,104 @@
+{{- if .Values.keycloak.enabled }}
+apiVersion: k8s.keycloak.org/v2beta1
+kind: Keycloak
+metadata:
+  name: keycloak
+  labels:
+    {{- include "keycloak-operator.labels" . | nindent 4 }}
+spec:
+  instances: {{ .Values.keycloak.instances }}
+  {{- if or .Values.keycloak.bootstrapAdmin.secretName .Values.keycloak.bootstrapAdmin.password }}
+  bootstrapAdmin:
+    user:
+      secret: {{ include "keycloak-operator.bootstrapAdminSecretName" . }}
+  {{- end }}
+  {{- with .Values.keycloak.env }}
+  env:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  db:
+    vendor: {{ .Values.keycloak.db.vendor }}
+    host: {{ .Values.keycloak.db.host }}
+    port: {{ .Values.keycloak.db.port }}
+    database: {{ .Values.keycloak.db.database }}
+    {{- with .Values.keycloak.db.url }}
+    url: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.keycloak.db.schema }}
+    schema: {{ . | quote }}
+    {{- end }}
+    {{- with .Values.keycloak.db.poolInitialSize }}
+    poolInitialSize: {{ . }}
+    {{- end }}
+    {{- with .Values.keycloak.db.poolMinSize }}
+    poolMinSize: {{ . }}
+    {{- end }}
+    {{- with .Values.keycloak.db.poolMaxSize }}
+    poolMaxSize: {{ . }}
+    {{- end }}
+    usernameSecret:
+      name: {{ .Values.keycloak.db.credentialsSecret.name }}
+      key: {{ .Values.keycloak.db.credentialsSecret.usernameKey }}
+    passwordSecret:
+      name: {{ .Values.keycloak.db.credentialsSecret.name }}
+      key: {{ .Values.keycloak.db.credentialsSecret.passwordKey }}
+  http:
+    httpEnabled: {{ .Values.keycloak.http.httpEnabled }}
+    {{- with .Values.keycloak.http.tlsSecret }}
+    tlsSecret: {{ . }}
+    {{- end }}
+  hostname:
+    hostname: {{ .Values.keycloak.hostname.hostname | quote }}
+    strict: {{ .Values.keycloak.hostname.strict }}
+  proxy:
+    headers: {{ .Values.keycloak.proxy.headers }}
+  {{- with .Values.keycloak.resources }}
+  resources:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- if or .Values.realmImport.affinity .Values.realmImport.tolerations }}
+  {{- /* Placement for the realm-import Jobs the operator spawns. The CRD hangs
+     this off the Keycloak CR (spec.import.scheduling) — KeycloakRealmImport
+     itself has no scheduling fields. */}}
+  import:
+    scheduling:
+      {{- with .Values.realmImport.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.realmImport.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  {{- end }}
+  {{- if or .Values.keycloak.affinity .Values.keycloak.tolerations }}
+  {{- /* The Keycloak CRD has no pod-spec affinity/tolerations fields; the
+     operator applies them via spec.scheduling. Values keep the standard
+     affinity/tolerations shape used by every other chart. */}}
+  scheduling:
+    {{- with .Values.keycloak.affinity }}
+    affinity:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.keycloak.tolerations }}
+    tolerations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- end }}
+  {{- if .Values.keycloak.ingress.enabled }}
+  ingress:
+    enabled: true
+    className: {{ .Values.keycloak.ingress.className }}
+    {{- with .Values.keycloak.ingress.annotations }}
+    annotations:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+  {{- else }}
+  ingress:
+    enabled: false
+  {{- end }}
+  {{- with .Values.keycloak.additionalOptions }}
+  additionalOptions:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
